@@ -1,6 +1,7 @@
 import cloudpickle
 import os
 import numpy as np
+from sympy import sin, cos, pi, Matrix, Symbol, simplify, trigsimp, pprint, utilities, zeros
 import sympy as sp
 
 
@@ -21,12 +22,12 @@ class robot_config:
         self._Mq_g = None  # placeholder for joint space gravity term function
 
         # set up our joint angle symbols
-        self.q = [sp.Symbol('q%i' % ii) for ii in range(self.num_joints)]
-        self.dq = [sp.Symbol('dq%i' % ii) for ii in range(self.num_joints)]
+        self.q = [Symbol('q%i' % ii) for ii in range(self.num_joints)]
+        self.dq = [Symbol('dq%i' % ii) for ii in range(self.num_joints)]
         # set up an (x,y,z) offset
-        self.x = [sp.Symbol('x'), sp.Symbol('y'), sp.Symbol('z')]
+        self.x = [Symbol('x'), Symbol('y'), Symbol('z')]
 
-        self.gravity = sp.Matrix([[0, 0, -9.81, 0, 0, 0]]).T
+        self.gravity = Matrix([[0, 0, -9.81, 0, 0, 0]]).T
 
         self.link_names = ['link%i' % (ii+1) for ii in range(self.num_links)]
         self.q_names = ['joint%i' % (ii+1) for ii in range(self.num_links)]
@@ -60,7 +61,7 @@ class robot_config:
 
         self._calc_T()
 
-        Jw = sp.Matrix([0,0,1])
+        Jw = Matrix([0,0,1])
         self.J_orientation = [
             self.T01[:3, :3] * Jw,  # joint 0 orientation
             self.T02[:3, :3] * Jw,  # joint 1 orientation
@@ -114,6 +115,19 @@ class robot_config:
         parameters = tuple(q) + tuple(x)
         return np.array(self._J[name](*parameters))
 
+    def Jx(self, name, q, x=[0, 0, 0]):
+        """ Calculates the transform for a joint or link
+
+        name string: name of the joint or link, or end-effector
+        q np.array: joint angles
+        """
+        # check for function in dictionary
+        if self._J.get(name, None) is None:
+            print('Generating Jacobian function for %s' % name)
+            self._J[name] = self._calc_Jx(name, x=x)
+        parameters = tuple(q) + tuple(x)
+        return np.array(self._J[name](*parameters))
+
     def Mq(self, q):
         """ Calculates the joint space inertia matrix for the ur5
 
@@ -126,7 +140,19 @@ class robot_config:
         parameters = tuple(q) + (0, 0, 0)
         return np.array(self._Mq(*parameters))
 
-    def _calc_Mq(self, lambdify=True):
+    def Mqx(self, q):
+        """ Calculates the joint space inertia matrix for the ur5
+
+        q np.array: joint angles
+        """
+        # check for function in dictionary
+        if self._Mq is None:
+            print('Generating inertia matrix function')
+            self._Mq = self._calc_Mq(jacobianx=True)
+        parameters = tuple(q) + (0, 0, 0)
+        return np.array(self._Mq(*parameters))
+
+    def _calc_Mq(self, lambdify=True, jacobianx=False):
         """ Uses Sympy to generate the inertia matrix in
         joint space for the ur5
 
@@ -134,31 +160,34 @@ class robot_config:
                           the Jacobian. If False returns the Sympy
                           matrix
         """
+        filename = 'Mqx' if jacobianx else 'Mq' 
 
         # check to see if we have our inertia matrix saved in file
-        if os.path.isfile('%s/Mq' % self.config_folder):
-            Mq = cloudpickle.load(open('%s/Mq' % self.config_folder, 'rb'))
+        if os.path.isfile('%s/%s' % (self.config_folder, filename)):
+            Mq = cloudpickle.load(open('%s/%s' % (self.config_folder, filename), 'rb'))
         else:
             # get the Jacobians for each link's COM
-            J = [self._calc_J('link%s' % (ii+1), self._CoM[ii], lambdify=False)
-                 for ii in range(self.num_links)] 
+            if jacobianx:
+                J = [self._calc_Jx('link%s' % (ii+1), lambdify=False)
+                    for ii in range(self.num_links)] 
+            else:
+                J = [self._calc_J('link%s' % (ii+1), lambdify=False)
+                    for ii in range(self.num_links)] 
             
 
             # transform each inertia matrix into joint space
             # sum together the effects of arm segments' inertia on each motor
-            Mq = sp.zeros(self.num_joints)
+            Mq = zeros(self.num_joints)
             for ii in range(self.num_links):
-                Mq += sp.Matrix(J[ii].T) * sp.Matrix(self._M[ii]) * sp.Matrix(J[ii])
-            Mq = sp.Matrix(Mq)
+                Mq += Matrix(J[ii].T) * Matrix(self._M[ii]) * Matrix(J[ii])
+            Mq = Matrix(Mq)
 
             if lambdify:
                 Mq = sp.lambdify(self.q + self.x, Mq)
 
             # save to file
-            cloudpickle.dump(Mq, open('%s/Mq' % self.config_folder, 'wb'))
+            cloudpickle.dump(Mq, open('%s/%s' % (self.config_folder, filename), 'wb'))
 
-        if lambdify is False:
-            return Mq
         return Mq
 
     def Mq_g(self, q):
@@ -173,7 +202,19 @@ class robot_config:
         parameters = tuple(q) + (0, 0, 0)
         return np.array(self._Mq_g(*parameters)).flatten()
 
-    def _calc_Mq_g(self, lambdify=True):
+    def Mq_gx(self, q):
+        """ Calculates the force of gravity in joint space for the ur5
+
+        q np.array: joint angles
+        """
+        # check for function in dictionary
+        if self._Mq_g is None:
+            print('Generating gravity effects function')
+            self._Mq_g = self._calc_Mq_g(jacobianx=True)
+        parameters = tuple(q) + (0, 0, 0)
+        return np.array(self._Mq_g(*parameters)).flatten()
+
+    def _calc_Mq_g(self, lambdify=True, jacobianx=False):
         """ Uses Sympy to generate the force of gravity in
         joint space for the ur5
 
@@ -181,35 +222,38 @@ class robot_config:
                           the Jacobian. If False returns the Sympy
                           matrix
         """
+        filename = 'Mq_gx' if jacobianx else 'Mq_g' 
 
         # check to see if we have our gravity term saved in file
-        if os.path.isfile('%s/Mq_g' % self.config_folder):
-            Mq_g = cloudpickle.load(open('%s/Mq_g' % self.config_folder,
+        if os.path.isfile('%s/%s' % (self.config_folder, filename)):
+            Mq_g = cloudpickle.load(open('%s/%s' % (self.config_folder, filename),
                                          'rb'))
         else:
             # get the Jacobians for each link's COM
-            J = [self._calc_J('link%s' % (ii+1), self._CoM[ii], lambdify=False)
-                 for ii in range(self.num_links)]
+            if jacobianx:
+                J = [self._calc_Jx('link%s' % (ii+1), lambdify=False)
+                    for ii in range(self.num_links)] 
+            else:
+                J = [self._calc_J('link%s' % (ii+1), lambdify=False)
+                    for ii in range(self.num_links)] 
 
             # transform each inertia matrix into joint space and
             # sum together the effects of arm segments' inertia on each motor
-            Mq_g = sp.zeros(self.num_joints, 1)
+            Mq_g = zeros(self.num_joints, 1)
             for ii in range(self.num_joints):
                 Mq_g += J[ii].T * self._M[ii] * self.gravity
-            Mq_g = sp.simplify(sp.Matrix(Mq_g))
+            Mq_g = simplify(Matrix(Mq_g))
             
             if lambdify:
                 Mq_g = sp.lambdify(self.q + self.x, Mq_g)
 
             # save to file
-            cloudpickle.dump(Mq_g, open('%s/Mq_g' % self.config_folder,
+            cloudpickle.dump(Mq_g, open('%s/%s' % (self.config_folder, filename),
                                         'wb'))
 
-        # if lambdify is False:
-        #     return Mq_g
         return Mq_g
 
-    def _calc_J(self, name, x, lambdify=True):
+    def _calc_J(self, name, x=[0,0,0], lambdify=True):
         """ Uses Sympy to generate the Jacobian for a joint or link
 
         name string: name of the joint or link, or end-effector
@@ -226,7 +270,7 @@ class robot_config:
             Tx = self._calc_Tx(name, x=x, lambdify=False)
             J = []
 
-            # calculate derivative of (x,y,z) wrt to eTx = self._calc_Tx(name, x=x, lambdify=lambdify)ach joint
+            # calculate derivative of (x,y,z) wrt to each joint
             for ii in range(self.num_joints):
                 J.append([])
                 J[ii].append(Tx[0].diff(self.q[ii]))  # dx/dq[ii]
@@ -247,34 +291,66 @@ class robot_config:
             cloudpickle.dump(J, open('%s/%s.J' %
                                      (self.config_folder, name), 'wb'))
 
-        J = sp.Matrix(J).T  # correct the orientation of J
+        J = Matrix(J).T  # correct the orientation of J
+        if lambdify is False:
+            return J
+        return sp.lambdify(self.q + self.x, J)
+
+    def _calc_Jx(self, name, x=[0,0,0], lambdify=True):
+        # check to see if we have our Jacobian saved in file
+        if os.path.isfile('%s/%s.Jx' % (self.config_folder, name)):
+            J = cloudpickle.load(open('%s/%s.Jx' %
+                                 (self.config_folder, name), 'rb'))
+        else:
+            link = int(name.strip('link').strip('joint'))-1
+            CoM = Matrix(self._calc_Tx(name, x, False)[0:3]).T
+            J = []
+            Jv = []
+            Jw = []
+            Jv.append(Matrix([0,0,1]).cross(CoM).T.tolist())
+            Jw.append(Matrix([0,0,1]).tolist())
+            for i in xrange(1,link+1):
+                Z = trigsimp(Matrix(self._get_T('link%s'%(i))[2,0:3]))
+                P = trigsimp(Matrix(self._get_T('link%s'%(i))[3,0:3]))
+                Jv.append(trigsimp(Z.cross(CoM - P).tolist()))
+                Jw.append(Z.tolist())
+            n = len(Jv)
+            
+            for i in range(n):
+                J.append(Jv[i]+Jw[i])  
+            J = utilities.iterables.flatten(J)    
+            J = J + (self.num_links**2 - len(J))*[0]
+            J = Matrix(J).reshape(6,6).T
+
+            # save to file
+            cloudpickle.dump(J, open('%s/%s.Jx' %
+                                     (self.config_folder, name), 'wb'))
         if lambdify is False:
             return J
         return sp.lambdify(self.q + self.x, J)
 
     def _calc_T(self):
         # segment lengths associated with each joint
-        # dh = [0.1045,-0.2437,-0.2133,0.0842,0.0013,0.0664]
         dh = [0.1519,-0.24365,-0.21325,0.11235,0.08535,0.08190]
         eef = 0
 
-        self.T01 =             self._compute_dh_matrix(0.,  sp.pi/2,   dh[0],  self.q[0]-sp.pi/2)
-        self.T02 =  self.T01 * self._compute_dh_matrix(dh[1],    0.,      0.,  self.q[1]-sp.pi/2)
-        self.T03 =  self.T02 * self._compute_dh_matrix(dh[2],    0.,      0.,  self.q[2])
-        self.T04 =  self.T03 * self._compute_dh_matrix(0.,  sp.pi/2,   dh[3],  self.q[3]-sp.pi/2)
-        self.T05 =  self.T04 * self._compute_dh_matrix(0., -sp.pi/2,   dh[4],  self.q[4])
-        self.T06 =  self.T05 * self._compute_dh_matrix(0.,       0.,   dh[5],  self.q[5])
+        self.T01 =             self._compute_dh_matrix(0.,     pi/2,    dh[0],  self.q[0]-pi/2)
+        self.T02 =  self.T01 * self._compute_dh_matrix(dh[1],    0.,       0.,  self.q[1]-pi/2)
+        self.T03 =  self.T02 * self._compute_dh_matrix(dh[2],    0.,       0.,  self.q[2])
+        self.T04 =  self.T03 * self._compute_dh_matrix(0.,      pi/2,   dh[3],  self.q[3]-pi/2)
+        self.T05 =  self.T04 * self._compute_dh_matrix(0.,     -pi/2,   dh[4],  self.q[4])
+        self.T06 =  self.T05 * self._compute_dh_matrix(0.,        0.,   dh[5],  self.q[5])
         self.T0EE = self.T06
         self.T = [self.T01,self.T02,self.T03,self.T04,self.T05,self.T06,self.T0EE]
-        self.T = sp.simplify(self.T)
+        self.T = simplify(self.T)
 
 
     def _compute_dh_matrix(self, r, alpha, d, theta):
-        A = [[sp.cos(theta), -sp.sin(theta)*sp.cos(alpha),  sp.sin(theta)*sp.sin(alpha),   r*sp.cos(theta)],
-             [sp.sin(theta),  sp.cos(theta)*sp.cos(alpha),  -sp.cos(theta)*sp.sin(alpha),  r*sp.sin(theta)],
-             [      0,               sp.sin(alpha),                sp.cos(alpha),                 d       ],
+        A = [[cos(theta), -sin(theta)*cos(alpha),  sin(theta)*sin(alpha),   r*cos(theta)],
+             [sin(theta),  cos(theta)*cos(alpha),  -cos(theta)*sin(alpha),  r*sin(theta)],
+             [      0,               sin(alpha),                cos(alpha),                 d       ],
              [      0,               0,                  0,                 1       ]]
-        return sp.Matrix(A)
+        return Matrix(A)
 
     def _get_T(self, name):
         if name == "EE":
@@ -286,7 +362,7 @@ class robot_config:
                 T = self.T[self.q_names.index(name)] 
         return T
 
-    def _calc_Tx(self, name, x, lambdify=True):
+    def _calc_Tx(self, name, x=[0,0,0], lambdify=True):
         """ Uses Sympy to transform x from the reference frame of a joint
         or link to the origin (world) coordinates.
 
@@ -299,13 +375,15 @@ class robot_config:
 
         # check to see if we have our transformation saved in file
         if (os.path.isfile('%s/%s.T' % (self.config_folder, name))) and False:
-            print "hola"
             Tx = cloudpickle.load(open('%s/%s.T' %
                                        (self.config_folder, name), 'rb'))
         else:
             T = self._get_T(name)
+            if 'link' in name:
+                _link = int(name.strip('link'))-1
+                x = (np.array(x) + np.array(self._CoM[_link])).tolist()
             # transform x into world coordinates
-            Tx = T * sp.Matrix(self.x + [1])
+            Tx = T * Matrix(x + [1])
             # save to file
             cloudpickle.dump(Tx, open('%s/%s.T' %
                                       (self.config_folder, name), 'wb'))
@@ -335,7 +413,7 @@ class robot_config:
             rotation_inv = T[:3, :3].T
             translation_inv = -rotation_inv * T[:3, 3]
             T_inv = rotation_inv.row_join(translation_inv).col_join(
-                sp.Matrix([[0, 0, 0, 1]]))
+                Matrix([[0, 0, 0, 1]]))
 
             # save to file
             cloudpickle.dump(T_inv, open('%s/%s.T_inv' %
@@ -345,7 +423,13 @@ class robot_config:
             return T_inv
         return sp.lambdify(self.q + self.x, T_inv)
 
+        
+
 # r = robot_config()
+# pprint(r._calc_Jx('link2',[0,0,0], False))
+# print "#######################"
+# J = r._calc_J('link2',[0,0,0], lambdify=False)
+# pprint(J)
 # q = [0.,0.,0.,0.,0.,0.]
 # JEE = r.J('EE', q)
 # dx = np.dot(JEE, np.array(q)+1)
