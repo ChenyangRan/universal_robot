@@ -19,7 +19,7 @@ class robot_config:
         self._CoM = [] # center of mass of each joint
         self._M = []  # placeholder for (x,y,z) inertia matrices
         self._Mq = None  # placeholder for joint space inertia matrix function
-        self._Mq_g = None  # placeholder for joint space gravity term function
+        self._g = None  # placeholder for joint space gravity term function
 
         # set up our joint angle symbols
         self.q = [Symbol('q%i' % ii) for ii in range(self.num_joints)]
@@ -129,7 +129,7 @@ class robot_config:
         return np.array(self._J[name](*parameters))
 
     def Mq(self, q):
-        """ Calculates the joint space inertia matrix for the ur5
+        """ Calculates the joint space inertia matrix for the ur3
 
         q np.array: joint angles
         """
@@ -141,7 +141,7 @@ class robot_config:
         return np.array(self._Mq(*parameters))
 
     def Mqx(self, q):
-        """ Calculates the joint space inertia matrix for the ur5
+        """ Calculates the joint space inertia matrix for the ur3
 
         q np.array: joint angles
         """
@@ -154,18 +154,17 @@ class robot_config:
 
     def _calc_Mq(self, lambdify=True, jacobianx=False):
         """ Uses Sympy to generate the inertia matrix in
-        joint space for the ur5
+        joint space for the ur3
 
         lambdify boolean: if True returns a function to calculate
                           the Jacobian. If False returns the Sympy
                           matrix
         """
         filename = 'Mqx' if jacobianx else 'Mq' 
-
-        # check to see if we have our inertia matrix saved in file
-        if os.path.isfile('%s/%s' % (self.config_folder, filename)):
-            Mq = cloudpickle.load(open('%s/%s' % (self.config_folder, filename), 'rb'))
-        else:
+        filename = '%s/%s' % (self.config_folder, filename)
+        # check to see if we have our Jacobian saved in file
+        Mq = self._get_from_file(filename)
+        if Mq is None:
             # get the Jacobians for each link's COM
             if jacobianx:
                 J = [self._calc_Jx('link%s' % (ii+1), lambdify=False)
@@ -174,7 +173,7 @@ class robot_config:
                 J = [self._calc_J('link%s' % (ii+1), lambdify=False)
                     for ii in range(self.num_links)] 
             
-
+            sp.pprint(J[5][:,5])
             # transform each inertia matrix into joint space
             # sum together the effects of arm segments' inertia on each motor
             Mq = zeros(self.num_joints)
@@ -186,72 +185,73 @@ class robot_config:
                 Mq = sp.lambdify(self.q + self.x, Mq)
 
             # save to file
-            cloudpickle.dump(Mq, open('%s/%s' % (self.config_folder, filename), 'wb'))
+            self._save_to_file(filename, Mq)
 
         return Mq
 
-    def Mq_g(self, q):
-        """ Calculates the force of gravity in joint space for the ur5
+    def g(self, q):
+        """ Calculates the force of gravity in joint space for the ur3
 
         q np.array: joint angles
         """
         # check for function in dictionary
-        if self._Mq_g is None:
+        if self._g is None:
             print('Generating gravity effects function')
-            self._Mq_g = self._calc_Mq_g()
+            self._g = self._calc_g()
         parameters = tuple(q) + (0, 0, 0)
-        return np.array(self._Mq_g(*parameters)).flatten()
+        return np.array(self._g(*parameters)).flatten()
 
-    def Mq_gx(self, q):
-        """ Calculates the force of gravity in joint space for the ur5
+    def gx(self, q):
+        """ Calculates the force of gravity in joint space for the ur3
 
         q np.array: joint angles
         """
         # check for function in dictionary
-        if self._Mq_g is None:
+        if self._g is None:
             print('Generating gravity effects function')
-            self._Mq_g = self._calc_Mq_g(jacobianx=True)
+            self._g = self._calc_g(jacobianx=True)
         parameters = tuple(q) + (0, 0, 0)
-        return np.array(self._Mq_g(*parameters)).flatten()
+        return np.array(self._g(*parameters)).flatten()
 
-    def _calc_Mq_g(self, lambdify=True, jacobianx=False):
-        """ Uses Sympy to generate the force of gravity in
-        joint space for the ur5
+    def _calc_g(self, lambdify=True, jacobianx=False):
+        """ Generate the force of gravity in joint space
 
-        lambdify boolean: if True returns a function to calculate
-                          the Jacobian. If False returns the Sympy
-                          matrix
+        Uses Sympy to generate the force of gravity in joint space
+
+        Parameters
+        ----------
+        lambdify : boolean, optional (Default: True)
+            if True returns a function to calculate the matrix.
+            If False returns the Sympy matrix
         """
-        filename = 'Mq_gx' if jacobianx else 'Mq_g' 
-
+        filename = 'gx' if jacobianx else 'g' 
+        filename = '%s/%s' % (self.config_folder, filename)
         # check to see if we have our gravity term saved in file
-        if os.path.isfile('%s/%s' % (self.config_folder, filename)):
-            Mq_g = cloudpickle.load(open('%s/%s' % (self.config_folder, filename),
-                                         'rb'))
-        else:
-            # get the Jacobians for each link's COM
-            if jacobianx:
-                J = [self._calc_Jx('link%s' % (ii+1), lambdify=False)
-                    for ii in range(self.num_links)] 
-            else:
-                J = [self._calc_J('link%s' % (ii+1), lambdify=False)
-                    for ii in range(self.num_links)] 
+        g = self._get_from_file(filename)
 
-            # transform each inertia matrix into joint space and
-            # sum together the effects of arm segments' inertia on each motor
-            Mq_g = zeros(self.num_joints, 1)
+        if g is None:
+            # if no saved file was loaded, generate function
+            print('Generating gravity compensation function')
+            get_J = self._calc_Jx if jacobianx else self._calc_J
+            # get the Jacobians for each link's COM
+            J_links = [get_J('link%s' % (ii+1), x=[0, 0, 0],
+                                    lambdify=False)
+                       for ii in range(self.num_links)]
+
+            # sum together the effects of each arm segment's inertia
+            g = zeros(self.num_joints, 1)
             for ii in range(self.num_joints):
-                Mq_g += J[ii].T * self._M[ii] * self.gravity
-            Mq_g = simplify(Matrix(Mq_g))
-            
+                # transform each inertia matrix into joint space
+                g += (J_links[ii].T * self._M[ii] * self.gravity)
+            g = Matrix(g)
+
             if lambdify:
-                Mq_g = sp.lambdify(self.q + self.x, Mq_g)
+                g = sp.lambdify(self.q + self.x, g)
 
             # save to file
-            cloudpickle.dump(Mq_g, open('%s/%s' % (self.config_folder, filename),
-                                        'wb'))
+            self._save_to_file(filename, g)
 
-        return Mq_g
+        return g
 
     def _calc_J(self, name, x=[0,0,0], lambdify=True):
         """ Uses Sympy to generate the Jacobian for a joint or link
@@ -261,12 +261,10 @@ class robot_config:
                           the Jacobian. If False returns the Sympy
                           matrix
         """
-
+        filename = '%s/%s.J' % (self.config_folder, name)
         # check to see if we have our Jacobian saved in file
-        if os.path.isfile('%s/%s.J' % (self.config_folder, name)):
-            J = cloudpickle.load(open('%s/%s.J' %
-                                 (self.config_folder, name), 'rb'))
-        else:
+        J = self._get_from_file(filename)
+        if J is None:
             Tx = self._calc_Tx(name, x=x, lambdify=False)
             J = []
 
@@ -288,8 +286,7 @@ class robot_config:
                     J[ii] = J[ii] + [0, 0, 0]
 
             # save to file
-            cloudpickle.dump(J, open('%s/%s.J' %
-                                     (self.config_folder, name), 'wb'))
+            self._save_to_file(filename, J)
 
         J = Matrix(J).T  # correct the orientation of J
         if lambdify is False:
@@ -297,11 +294,18 @@ class robot_config:
         return sp.lambdify(self.q + self.x, J)
 
     def _calc_Jx(self, name, x=[0,0,0], lambdify=True):
+        """ Uses Sympy to generate the Jacobian for a joint or link
+        Non-derivative approach
+
+        name string: name of the joint or link, or end-effector
+        lambdify boolean: if True returns a function to calculate
+                          the Jacobian. If False returns the Sympy
+                          matrix
+        """
+        filename = '%s/%s.Jx' % (self.config_folder, name)
         # check to see if we have our Jacobian saved in file
-        if os.path.isfile('%s/%s.Jx' % (self.config_folder, name)):
-            J = cloudpickle.load(open('%s/%s.Jx' %
-                                 (self.config_folder, name), 'rb'))
-        else:
+        J = self._get_from_file(filename)
+        if J is None:
             link = int(name.strip('link').strip('joint'))-1
             CoM = Matrix(self._calc_Tx(name, x, False)[0:3]).T
             J = []
@@ -323,8 +327,7 @@ class robot_config:
             J = Matrix(J).reshape(6,6).T
 
             # save to file
-            cloudpickle.dump(J, open('%s/%s.Jx' %
-                                     (self.config_folder, name), 'wb'))
+            self._save_to_file(filename, J)
         if lambdify is False:
             return J
         return sp.lambdify(self.q + self.x, J)
@@ -332,7 +335,6 @@ class robot_config:
     def _calc_T(self):
         # segment lengths associated with each joint
         dh = [0.1519,-0.24365,-0.21325,0.11235,0.08535,0.08190]
-        eef = 0
 
         self.T01 =             self._compute_dh_matrix(0.,     pi/2,    dh[0],  self.q[0]-pi/2)
         self.T02 =  self.T01 * self._compute_dh_matrix(dh[1],    0.,       0.,  self.q[1]-pi/2)
@@ -348,8 +350,8 @@ class robot_config:
     def _compute_dh_matrix(self, r, alpha, d, theta):
         A = [[cos(theta), -sin(theta)*cos(alpha),  sin(theta)*sin(alpha),   r*cos(theta)],
              [sin(theta),  cos(theta)*cos(alpha),  -cos(theta)*sin(alpha),  r*sin(theta)],
-             [      0,               sin(alpha),                cos(alpha),                 d       ],
-             [      0,               0,                  0,                 1       ]]
+             [      0,               sin(alpha),                cos(alpha),       d     ],
+             [      0,               0,                        0,                 1     ]]
         return Matrix(A)
 
     def _get_T(self, name):
@@ -374,10 +376,9 @@ class robot_config:
         """
 
         # check to see if we have our transformation saved in file
-        if (os.path.isfile('%s/%s.T' % (self.config_folder, name))) and False:
-            Tx = cloudpickle.load(open('%s/%s.T' %
-                                       (self.config_folder, name), 'rb'))
-        else:
+        filename = '%s/%s.T_inv' % (self.config_folder, name)
+        T_inv = self._get_from_file(filename)
+        if T_inv is None:
             T = self._get_T(name)
             if 'link' in name:
                 _link = int(name.strip('link'))-1
@@ -402,13 +403,10 @@ class robot_config:
                           the transform. If False returns the Sympy
                           matrix
         """
-
+        filename = '%s/%s.T_inv' % (self.config_folder, name)
+        T_inv = self._get_from_file(filename)
         # check to see if we have our transformation saved in file
-        if (os.path.isfile('%s/%s.T_inv' % (self.config_folder,
-                                                name))):
-            T_inv = cloudpickle.load(open('%s/%s.T_inv' %
-                                          (self.config_folder, name), 'rb'))
-        else:
+        if T_inv is None:
             T = self._get_T(name=name)
             rotation_inv = T[:3, :3].T
             translation_inv = -rotation_inv * T[:3, 3]
@@ -416,14 +414,22 @@ class robot_config:
                 Matrix([[0, 0, 0, 1]]))
 
             # save to file
-            cloudpickle.dump(T_inv, open('%s/%s.T_inv' %
-                                         (self.config_folder, name), 'wb'))
+            self._save_to_file(filename, T_inv)
 
         if lambdify is False:
             return T_inv
         return sp.lambdify(self.q + self.x, T_inv)
 
-        
+    def _get_from_file(self, filename):
+        try:
+            expr = cloudpickle.load(open(filename, 'rb'))
+        except Exception:
+            expr = None
+        return expr
+
+    def _save_to_file(self, filename, data):
+        # save to file
+        cloudpickle.dump(data, open(filename, 'wb'))    
 
 # r = robot_config()
 # pprint(r._calc_Jx('link2',[0,0,0], False))

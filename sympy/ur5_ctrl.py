@@ -16,6 +16,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 '''
 import numpy as np
 import vrep
+import traceback, sys
 
 import ur5
 
@@ -28,7 +29,7 @@ vrep.simxFinish(-1)
 # Connect to the V-REP continuous server
 clientID = vrep.simxStart('127.0.0.1', 19997, True, True, 500, 5)
 
-try:
+def execute(clientID, robot_config):
     if clientID != -1: # if we connected successfully  # noqa C901
         print('Connected to remote API server')
 
@@ -81,7 +82,7 @@ try:
 
         # --------------------- Start the simulation
 
-        dt = .01
+        dt = .001
         vrep.simxSetFloatingParameter(
             clientID,
             vrep.sim_floatparam_simulation_time_step,
@@ -136,7 +137,7 @@ try:
                     joint_handle,
                     vrep.simx_opmode_blocking)
                 if _ != 0:
-                    raise Exception()
+                    raise Exception("get joint angles")
 
                 # get the joint velocity
                 _, dq[ii] = vrep.simxGetObjectFloatParameter(
@@ -145,7 +146,7 @@ try:
                     2012,  # parameter ID for angular velocity of the joint
                     vrep.simx_opmode_blocking)
                 if _ != 0:
-                    raise Exception()
+                    raise Exception("get joint position")
 
             # calculate position of the end-effector
             # derived in the ur5 calc_TnJ class
@@ -158,7 +159,7 @@ try:
             Mq = robot_config.Mq(q)
 
             # calculate the effect of gravity in joint space
-            Mq_g = robot_config.Mq_g(q)
+            g = robot_config.g(q)
 
             # convert the mass compensation into end effector space
             Mx_inv = np.dot(JEE, np.dot(np.linalg.inv(Mq), JEE.T))
@@ -189,7 +190,7 @@ try:
             u_xyz = np.dot(Mx, u_xyz)
 
             # transform into joint space, add vel and gravity compensation
-            u = np.dot(JEE.T, u_xyz) - Mq_g
+            u = np.dot(JEE.T, u_xyz) - g
 
             # calculate the null space filter
             Jdyn_inv = np.dot(Mx, np.dot(JEE, np.linalg.inv(Mq)))
@@ -336,8 +337,10 @@ try:
             # move simulation ahead one time step
             vrep.simxSynchronousTrigger(clientID)
             count += dt
-    else:
-        raise Exception('Failed connecting to remote API server')
+    
+
+try:
+    execute(clientID, robot_config)
 finally:
     # stop the simulation
     vrep.simxStopSimulation(clientID, vrep.simx_opmode_blocking)
@@ -350,40 +353,39 @@ finally:
     vrep.simxFinish(clientID)
     print('connection closed...')
 
-    import matplotlib as mpl
-    from mpl_toolkits.mplot3d import Axes3D
-    import matplotlib.pyplot as plt
+    # import matplotlib as mpl
+    # from mpl_toolkits.mplot3d import Axes3D
+    # import matplotlib.pyplot as plt
 
-    track_hand = np.array(track_hand)
-    track_target = np.array(track_target)
-    track_obstacle = np.array(track_obstacle)
+    # track_hand = np.array(track_hand)
+    # track_target = np.array(track_target)
+    # track_obstacle = np.array(track_obstacle)
 
-    fig = plt.figure()
-    ax = fig.gca(projection='3d')
-    print "CAM", track_hand
-    # plot start point of hand
-    ax.plot([track_hand[0, 0]],
-            [track_hand[0, 1]],
-            [track_hand[0, 2]],
-            'bx', mew=10)
-    # plot trajectory of hand
-    ax.plot(track_hand[:, 0],
-            track_hand[:, 1],
-            track_hand[:, 2])
-    # plot trajectory of target
-    ax.plot(track_target[:, 0],
-            track_target[:, 1],
-            track_target[:, 2],
-            'rx', mew=10)
-    # plot trajectory of obstacle
-    ax.plot(track_obstacle[:, 0],
-            track_obstacle[:, 1],
-            track_obstacle[:, 2],
-            'yx', mew=10)
+    # fig = plt.figure()
+    # ax = fig.gca(projection='3d')
+    # # plot start point of hand
+    # ax.plot([track_hand[0, 0]],
+    #         [track_hand[0, 1]],
+    #         [track_hand[0, 2]],
+    #         'bx', mew=10)
+    # # plot trajectory of hand
+    # ax.plot(track_hand[:, 0],
+    #         track_hand[:, 1],
+    #         track_hand[:, 2])
+    # # plot trajectory of target
+    # ax.plot(track_target[:, 0],
+    #         track_target[:, 1],
+    #         track_target[:, 2],
+    #         'rx', mew=10)
+    # # plot trajectory of obstacle
+    # ax.plot(track_obstacle[:, 0],
+    #         track_obstacle[:, 1],
+    #         track_obstacle[:, 2],
+    #         'yx', mew=10)
 
-    ax.set_xlim([-1, 1])
-    ax.set_ylim([-.5, .5])
-    ax.set_zlim([0, 1])
-    ax.legend()
+    # ax.set_xlim([-1, 1])
+    # ax.set_ylim([-.5, .5])
+    # ax.set_zlim([0, 1])
+    # ax.legend()
 
-    plt.show()
+    # plt.show()

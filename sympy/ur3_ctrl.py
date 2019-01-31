@@ -16,7 +16,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 '''
 import sys
 import numpy as np
-# np.set_printoptions(precision=5)
+np.set_printoptions(precision=5)
 import vrep_client
 
 import ur3
@@ -26,6 +26,8 @@ import ur3
 robot_config = ur3.robot_config()
 
 vrep = vrep_client.vrep('127.0.0.1', 19997, True, True, 500, 5)
+track_hand = []
+track_target = []
 
 def velocity_P_control(qd, q, K):
     u = K * (qd - q)
@@ -53,15 +55,13 @@ def print_info():
 
     force = [56,56,28,12,12,12]
 
-    for ii, joint_handle in enumerate(handles):
+    for ii, joint_handle in enumerate(joint_handles):
         vrep.vp.simxSetJointForce(vrep.clientID,joint_handle, force[ii], vrep.vp.simx_opmode_blocking)
 
     for ii in range(len(handles)):
         print ur3_parts[ii], repr(np.array(vrep.get_obj_position(handles[ii], relative=vrep.vp.sim_handle_parent, op_mode=vrep.vp.simx_opmode_blocking)))
         if ii==11:
             break
-
-
     
 def control_loop():
     # --------------------- Setup the simulation
@@ -123,7 +123,7 @@ def control_loop():
     else:
         raise Exception('Failed connecting to remote API server')
 
-def force_control():
+def force_control_vel():
     # --------------------- Setup the simulation
     vrep.synchronous()
 
@@ -169,8 +169,12 @@ def force_control():
     kp = 200.0
     kv = np.sqrt(kp)
 
-    track_hand = []
-    track_target = []
+
+    # NOTE: Notation:
+    # x: end-effector position
+    # x_d: x dot, end-effector velocity
+    # x_dd: x doble dot, end-effector acceleration
+    # q, dq: joint angles, joint velocity
 
     # NOTE: main loop starts here -----------------------------------------
     while count < 1000:
@@ -181,9 +185,9 @@ def force_control():
             target_index += 1
 
         # get the (x,y,z) position of the target
-        target_xyz = vrep.get_obj_position(target_handle)
-        track_target.append(np.copy(target_xyz))  # store for plotting
-        target_xyz = np.asarray(target_xyz)
+        target_x = vrep.get_obj_position(target_handle)
+        track_target.append(np.copy(target_x))  # store for plotting
+        target_x = np.asarray(target_x)
 
         for ii, joint_handle in enumerate(joint_handles):
             # get the joint angles
@@ -195,19 +199,19 @@ def force_control():
 
         # calculate position of the end-effector
         # derived in the ur3 calc_TnJ class
-        xyz = robot_config.Tx('EE', q)
+        x = robot_config.Tx('EE', q)
 
         # calculate the Jacobian for the end effector
-        JEE = robot_config.J('EE', q)
+        J = robot_config.J('EE', q)
 
         # calculate the inertia matrix in joint space
         Mq = robot_config.Mq(q)
 
         # calculate the effect of gravity in joint space
-        Mq_g = robot_config.Mq_g(q)
+        Mq_g = robot_config.g(q)
 
         # convert the mass compensation into end effector space
-        Mx_inv = np.dot(JEE, np.dot(np.linalg.inv(Mq), JEE.T))
+        Mx_inv = np.dot(J, np.dot(np.linalg.inv(Mq), J.T))
         svd_u, svd_s, svd_v = np.linalg.svd(Mx_inv)
         # cut off any singular values that could cause control problems
         singularity_thresh = .00025
@@ -217,56 +221,137 @@ def force_control():
         # numpy returns U,S,V.T, so have to transpose both here
         Mx = np.dot(svd_v.T, np.dot(np.diag(svd_s), svd_u.T))
 
-        # calculate desired force in (x,y,z) space
-        dx = np.dot(JEE, dq)
+        ### calculate desired force in (x,y,z) space
+        # Velocidad end effector
+        dx = np.dot(J, dq)
 
-        # implement velocity limiting
+        # implement velocity control
         lamb = kp / kv
-        x_tilde = xyz - target_xyz
-        sat = vmax / (lamb * np.abs(x_tilde))
+        x_error = x - target_x
+        sat = vmax / (lamb * np.abs(x_error))
         scale = np.ones(3)
         if np.any(sat < 1):
             index = np.argmin(sat)
-            unclipped = kp * x_tilde[index]
-            clipped = kv * vmax * np.sign(x_tilde[index])
+            unclipped = kp * x_error[index]
+            clipped = kv * vmax * np.sign(x_error[index])
             scale = np.ones(3) * clipped / unclipped
             scale[index] = 1
         
         u_xyz = -kv * (dx - np.clip(sat / scale, 0, 1) *
-                            -lamb * scale * x_tilde)
+                            -lamb * scale * x_error)
         u_xyz = np.dot(Mx, u_xyz)
 
         # transform into joint space, add vel and gravity compensation
-        u = np.dot(JEE.T, u_xyz) - Mq_g
-
-        # calculate the null space filter
-        Jdyn_inv = np.dot(Mx, np.dot(JEE, np.linalg.inv(Mq)))
-        null_filter = (np.eye(robot_config.num_joints) -
-                        np.dot(JEE.T, Jdyn_inv))
-        # calculate our secondary control signal
-        q_des = np.zeros(robot_config.num_joints)
-        dq_des = np.zeros(robot_config.num_joints)
-        # calculated desired joint angle acceleration using rest angles
-        for ii in range(1, robot_config.num_joints):
-            if robot_config.rest_angles[ii] is not None:
-                q_des[ii] = (
-                    ((robot_config.rest_angles[ii] - q[ii]) + np.pi) %
-                    (np.pi*2) - np.pi)
-                dq_des[ii] = dq[ii]
-        # only compensate for velocity for joints with a control signal
-        nkp = kp * .1
-        nkv = np.sqrt(nkp)
-        u_null = np.dot(Mq, (nkp * q_des - nkv * dq_des))
-
-        u += np.dot(null_filter, u_null)
-
-        # get the (x,y,z) position of the center of the obstacle
-        v = np.asarray([1,1,1])
+        u = np.dot(J.T, u_xyz) - Mq_g
 
         # multiply by -1 because torque is opposite of expected
-        u *= -1
-        u = [0,0,0,0,10,0]
+        # u = np.array([0, 0, 0, 10, 0, 0])
+        u = u*-1
+
         print('u: ', u)
+
+        for ii, joint_handle in enumerate(joint_handles):
+            # the way we're going to do force control is by setting
+            # the target velocities of each joint super high and then
+            # controlling the max torque allowed (yeah, i know)
+
+            # get the current joint torque
+            torque = vrep.get_joint_force(joint_handle)
+
+            # if force has changed signs,
+            # we need to change the target velocity sign
+            if np.sign(torque) * np.sign(u[ii]) <= 0:
+                joint_target_velocities[ii] = \
+                    joint_target_velocities[ii] * -1
+                vrep.set_joint_target_vel(
+                    joint_handle,
+                    joint_target_velocities[ii])  # target velocity
+
+            # and now modulate the force
+            vrep.set_joint_force(
+                joint_handle,
+                abs(u[ii]))  # force to apply
+
+        # Update position of hand sphere
+        vrep.set_obj_position(
+            hand_handle,
+            x)
+        track_hand.append(np.copy(x))  # and store for plotting
+
+        # move simulation ahead one time step
+        vrep.synchronous_trigger()
+        count += dt
+
+def force_control():
+    # --------------------- Setup the simulation
+    vrep.synchronous()
+
+    # joint target velocities discussed below
+    joint_target_velocities = np.ones(robot_config.num_joints) * 10000.0
+
+    # get the handles for each joint and set up streaming
+    joint_handles = vrep.get_obj_handle(robot_config.joint_names)
+    
+    # get handle for target and set up streaming
+    target_handle = vrep.get_obj_handle('target')
+    # get handle for hand
+    hand_handle = vrep.get_obj_handle('hand')
+
+    # define variables to share with nengo
+    q = np.zeros(len(joint_handles))
+    dq = np.zeros(len(joint_handles))
+
+    # define a set of targets
+    center = np.array([0., 0., 0.5])
+    dist = .25
+    num_targets = 2
+    target_positions = np.array([
+        [dist*np.cos(theta)*np.sin(theta),
+            dist*np.cos(theta),
+            dist*np.sin(theta)] +
+        center for theta in np.linspace(.5, np.pi*2, num_targets)])
+    
+
+    # --------------------- Start the simulation----------------
+
+    # specify a simulation time 
+    dt = .001
+    vrep.set_floating_parameter(dt)
+
+    # start our simulation in lockstep with our code
+    vrep.start_simulation()
+
+    count = 0
+    target_index = 0
+    change_target_time = dt*1000
+
+    # NOTE: main loop starts here -----------------------------------------
+    while count < 1000:
+
+        # every so often move the target
+        if (count % change_target_time) < dt:
+            vrep.set_obj_position(target_handle, target_positions[target_index])
+            target_index += 1
+
+        # get the (x,y,z) position of the target
+        target_x = vrep.get_obj_position(target_handle)
+        track_target.append(np.copy(target_x))  # store for plotting
+        target_x = np.asarray(target_x)
+
+        for ii, joint_handle in enumerate(joint_handles):
+            # get the joint angles
+            q[ii] = vrep.get_joint_position(joint_handle)
+            
+            # get the joint velocity
+            param_id = 2012 # parameter ID for angular velocity of the joint
+            dq[ii] = vrep.get_obj_param(joint_handle, param_id)
+
+
+        xyz, u = controller_step(q, dq, target_x)
+        
+        # multiply by -1 because torque is opposite of expected
+        u *= -1
+        print ('u:', np.array(u))
 
         for ii, joint_handle in enumerate(joint_handles):
             # the way we're going to do force control is by setting
@@ -299,6 +384,102 @@ def force_control():
         # move simulation ahead one time step
         vrep.synchronous_trigger()
         count += dt
+
+def compute_null_space(JEE, Mx, Mq, q, dq):
+    kp = 200.0
+
+    # calculate the null space filter
+    Jdyn_inv = np.dot(Mx, np.dot(JEE, np.linalg.inv(Mq)))
+    null_filter = (np.eye(robot_config.num_joints) -
+                    np.dot(JEE.T, Jdyn_inv))
+    # calculate our secondary control signal
+    q_des = np.zeros(robot_config.num_joints)
+    dq_des = np.zeros(robot_config.num_joints)
+    # calculated desired joint angle acceleration using rest angles
+    for ii in range(1, robot_config.num_joints):
+        if robot_config.rest_angles[ii] is not None:
+            q_des[ii] = (
+                ((robot_config.rest_angles[ii] - q[ii]) + np.pi) %
+                (np.pi*2) - np.pi)
+            dq_des[ii] = dq[ii]
+    # only compensate for velocity for joints with a control signal
+    nkp = kp * .1
+    nkv = np.sqrt(nkp)
+    u_null = np.dot(Mq, (nkp * q_des - nkv * dq_des))
+    return np.dot(null_filter, u_null)
+
+def controller_step(q, dq, target_x):
+    # calculate position of the end-effector
+    # derived in the ur3 calc_TnJ class 
+    x = robot_config.Tx('EE', q)
+
+    # calculate the Jacobian for the end effector
+    JEE = robot_config.J('EE', q)
+
+    # calculate the inertia matrix in joint space
+    Mq = robot_config.Mq(q)
+
+    # calculate the effect of gravity in joint space
+    g = robot_config.g(q)
+
+    # convert the mass compensation into end effector space
+    Mx = compute_mass_ee(JEE, Mq)
+
+    # calculate desired force in (x,y,z) space
+    dx = np.dot(JEE, dq)
+
+    # implement velocity limiting
+    u_x = compute_acc_desired(x, dx, target_x)
+
+    u_x = np.dot(Mx, u_x)
+
+    # transform into joint space, add vel and gravity compensation
+    u = np.dot(JEE.T, u_x) - g
+    # u += compute_null_space(JEE, Mx, Mq, q, dq)
+    return x, u
+
+def compute_acc_desired(x, dx, x_d):
+    """
+        Inner motion control loop
+        x: current position
+        x_d: desired position
+    """
+    vmax = 0.25
+    kp = 200.0
+    kv = np.sqrt(kp)
+    lamb = kp / kv
+    x_tilde = x - x_d
+    sat = vmax / (lamb * np.abs(x_tilde))
+    scale = np.ones(3)
+    if np.any(sat < 1):
+        index = np.argmin(sat)
+        unclipped = kp * x_tilde[index]
+        clipped = kv * vmax * np.sign(x_tilde[index])
+        scale = np.ones(3) * clipped / unclipped
+        scale[index] = 1
+    
+    u_x = -kv * (dx - np.clip(sat / scale, 0, 1) *
+                        -lamb * scale * x_tilde)
+    return u_x
+
+def compute_simple_acc_desired(x, dx, x_d):
+    """
+        Inner motion control loop
+        x: current position
+        x_d: desired position
+    """
+    v_max = 0.1
+    kp = 100.0
+    kv = np.sqrt(kp)
+    u_x = kp * (x_d - x) + kv * (v_max - dx)
+    return u_x
+
+def compute_mass_ee(JEE, Mq):
+    """convert the mass compensation into end effector space"""
+    print Mq
+    M_inv = np.linalg.inv(Mq)
+    Mx_inv = np.dot(JEE, np.dot(M_inv, JEE.T)) # Mx_inv = JEE * M_inv * JEE.T
+    return np.linalg.pinv(Mx_inv, rcond=0.00025) # Mx = invert(Mx_inv) *pseudo invert
 
 def forward_kinematics():
     # --------------------- Setup the simulation
@@ -398,9 +579,9 @@ def plot_traj(track_hand, track_target):
 
     plt.show()
 
-# force_control()
 try:
-    # forward_kinematics()
+    #forward_kinematics()
+    # force_control_vel()
     # force_control()
     # control_loop()
     print_info()
@@ -414,4 +595,5 @@ finally:
 
     # Now close the connection to V-REP:
     vrep.close_connection()
+    # plot_traj(track_hand, track_target)
 
